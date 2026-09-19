@@ -42,6 +42,10 @@ public static class Program
     private static void ReplaceOlderInstances()
     {
         var self = Process.GetCurrentProcess();
+        // The single-instance mutex is Local\ (per session), so the process sweep has to be session-scoped too:
+        // killing every process named hoonsoo would reach another user's session on the same machine
+        // (RDP, fast user switching) and terminate their tray app without notice.
+        var session = self.SessionId;
         foreach (var name in new[] { "hoonsoo", "DevLingo" })
         {
             foreach (var p in Process.GetProcessesByName(name))
@@ -49,6 +53,7 @@ public static class Program
                 if (p.Id == self.Id) continue;
                 try
                 {
+                    if (p.SessionId != session) continue;
                     // Workers (--uia/--ocr) start after us; only stop earlier mains.
                     if (p.StartTime > self.StartTime) continue;
                     p.Kill();
@@ -175,7 +180,7 @@ public sealed class AppController : IDisposable
         try
         {
             if (next.Startup != previous.Startup) SettingsStore.SetStartup(next.Startup);
-            store.Save(next); settings = next.Copy(); ApplyTheme(settings.Theme); Cancel(); var oldProvider = provider; provider = NewProvider(); oldProvider.Dispose(); return null;
+            store.Save(next); settings = next.Copy(); ApplyTheme(settings.Theme); Cancel(); var oldProvider = provider; provider = NewProvider(); _ = oldProvider.RetireAsync(); return null;
         }
         catch
         {

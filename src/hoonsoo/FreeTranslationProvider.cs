@@ -165,5 +165,17 @@ public sealed class FreeTranslationProvider : IDisposable
         string[] entries = ["API|응용 프로그램 인터페이스", "cache|캐시", "framework|프레임워크", "dependency|의존성", "package|패키지", "component|컴포넌트", "function|함수", "variable|변수", "server|서버", "client|클라이언트", "build|빌드", "deploy|배포", "async|비동기", "database|데이터베이스", "repository|저장소", "runtime|실행 환경", "exception|예외", "callback|콜백"];
         return entries.Select(x => x.Split('|')).Where(x => Regex.IsMatch(text, @"\b" + Regex.Escape(x[0]) + @"\b", RegexOptions.IgnoreCase)).Take(12).Select(x => new DetectedTerm(x[0], x[1])).ToArray();
     }
+    /// <summary>
+    /// Retires the client without racing an in-flight request. The gate is held for the whole of
+    /// TranslateAsync, so waiting on it guarantees the old HttpClient is idle before it is disposed;
+    /// disposing right after Cancel() could otherwise tear the client out from under a running call
+    /// and surface as a generic "translation failed" message.
+    /// </summary>
+    public async Task RetireAsync()
+    {
+        await gate.WaitAsync().ConfigureAwait(false);
+        try { client.Dispose(); }
+        finally { gate.Release(); }
+    }
     public void Dispose() { client.Dispose(); }
 }
