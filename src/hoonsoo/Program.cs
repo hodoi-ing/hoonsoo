@@ -103,6 +103,7 @@ public sealed class AppController : IDisposable
     {
         store = settingsStore ?? new SettingsStore(); capture = captureClient ?? new CaptureClient();
         this.app = app; settings = store.Load(); provider = NewProvider();
+        ApplyLanguages(settings);
         // Must precede the NotifyIcon: the WinForms colour-mode call only affects controls created after
         // it, and the tray menu is the one surface the shared palette cannot reach directly.
         ApplyTheme(settings.Theme);
@@ -118,7 +119,17 @@ public sealed class AppController : IDisposable
         areaHotkey.Pressed += () => _ = TranslateAsync(true);
         arHotkey.Pressed += () => _ = TranslateArScreenAsync();
     }
-    private FreeTranslationProvider NewProvider() => new();
+    private FreeTranslationProvider NewProvider() => new(null, TranslationOptions.From(settings));
+
+    /// <summary>
+    /// Keeps the AR subtitle engine on the same language pair as the popup path. The AR service is static and has
+    /// no settings reference of its own, so the pair is pushed here whenever settings load or change.
+    /// </summary>
+    private static void ApplyLanguages(Settings settings)
+    {
+        ArTranslationService.SourceLanguage = TranslationEngines.NormalizeCode(settings.SourceLanguage, "en");
+        ArTranslationService.TargetLanguage = TranslationEngines.NormalizeCode(settings.TargetLanguage, "ko");
+    }
 
     /// <summary>
     /// Applies the palette and keeps the OS-theme subscription in sync: only a "system" choice needs it,
@@ -180,7 +191,7 @@ public sealed class AppController : IDisposable
         try
         {
             if (next.Startup != previous.Startup) SettingsStore.SetStartup(next.Startup);
-            store.Save(next); settings = next.Copy(); ApplyTheme(settings.Theme); Cancel(); var oldProvider = provider; provider = NewProvider(); _ = oldProvider.RetireAsync(); return null;
+            store.Save(next); settings = next.Copy(); ApplyLanguages(settings); ApplyTheme(settings.Theme); Cancel(); var oldProvider = provider; provider = NewProvider(); _ = oldProvider.RetireAsync(); return null;
         }
         catch
         {

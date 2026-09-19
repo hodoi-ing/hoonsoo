@@ -34,6 +34,14 @@ public sealed record Settings
     public int ArTextPercent { get; set; } = 100;
     /// <summary>On-screen size for the dragged-area plate, in percent. Independent of <see cref="ArTextPercent"/>.</summary>
     public int RegionTextPercent { get; set; } = 100;
+    /// <summary>"free" | "google" | "deepl" | "papago" — which backend translates. String so settings.json stays human-editable.</summary>
+    public string Engine { get; set; } = TranslationEngines.Free;
+    /// <summary>Source language code; see <see cref="TranslationEngines.Languages"/>. Local OCR is still English-only.</summary>
+    public string SourceLanguage { get; set; } = "en";
+    /// <summary>Target language code.</summary>
+    public string TargetLanguage { get; set; } = "ko";
+    /// <summary>Key for the selected engine. Papago uses "ClientID:ClientSecret". Stored as plain text in settings.json.</summary>
+    public string ApiKey { get; set; } = "";
     public HashSet<string> Excluded { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public double ArTextScale => ArTextPercent / 100.0;
     public double RegionTextScale => RegionTextPercent / 100.0;
@@ -55,6 +63,10 @@ public sealed record Settings
         RegionResult = RegionResultModes.Normalize(RegionResult);
         ArTextPercent = SnapTextPercent(ArTextPercent);
         RegionTextPercent = SnapTextPercent(RegionTextPercent);
+        Engine = TranslationEngines.Normalize(Engine);
+        SourceLanguage = TranslationEngines.NormalizeCode(SourceLanguage, "en");
+        TargetLanguage = TranslationEngines.NormalizeCode(TargetLanguage, "ko");
+        ApiKey = (ApiKey ?? "").Trim();
         if (!Hotkey.IsValid(Modifiers, Key)) { Key = 0x44; Modifiers = 3; }
         if (!Hotkey.IsValid(RegionModifiers, RegionKey)) { RegionKey = 0x52; RegionModifiers = 3; }
         if (!Hotkey.IsValid(AreaModifiers, AreaKey)) { AreaKey = 0x4F; AreaModifiers = 3; }

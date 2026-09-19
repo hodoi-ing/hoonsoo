@@ -68,7 +68,12 @@ public static class ArTranslationService
     // dropped (see SplitForTranslation).
     private const int MaxBatchItems = 20;
     private const int MaxEscapedQueryLength = 1800;
-    private const string Endpoint = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=";
+    /// <summary>AR subtitle language pair. Set from settings by AppController; English source by default.</summary>
+    public static string SourceLanguage { get; set; } = "en";
+    public static string TargetLanguage { get; set; } = "ko";
+    // Built per request instead of being a const: the pair now follows settings, while the endpoint stays the
+    // same undocumented one the popup path uses (and the AR path has no keyed alternative).
+    private static string Endpoint => $"https://translate.googleapis.com/translate_a/single?client=gtx&sl={SourceLanguage}&tl={TargetLanguage}&dt=t&q=";
 
     private static readonly HashSet<string> CodeKeywords = new(StringComparer.OrdinalIgnoreCase)
     {

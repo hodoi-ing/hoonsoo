@@ -338,6 +338,113 @@ public sealed class SettingsWindow : Window
             Child = themePick
         });
 
+        // 번역 엔진 카드 — 지금까지는 비공식 무료 엔드포인트 하나뿐이었고 언어도 en→ko로 고정이었다.
+        // 키가 필요한 엔진을 고르면 아래 칸이 그 키를 쓰고, 저장 시 새 프로바이더가 만들어진다.
+        rightCol.Children.Add(Ui.Heading("번역 엔진 · 언어"));
+        rightCol.Children.Add(Ui.Text("무료 엔진은 키 없이 동작합니다. 다른 엔진은 아래 API 키가 필요합니다.", 12, true));
+
+        var engineCardContent = new StackPanel();
+
+        var enginePick = new ComboBox();
+        Ui.StyleComboBox(enginePick);
+        enginePick.Items.Add("무료 (비공식 웹)");
+        enginePick.Items.Add("Google 번역 API");
+        enginePick.Items.Add("DeepL API");
+        enginePick.Items.Add("Papago NMT");
+        enginePick.SelectedIndex = TranslationEngines.Normalize(draft.Engine) switch
+        {
+            TranslationEngines.Google => 1,
+            TranslationEngines.DeepL => 2,
+            TranslationEngines.Papago => 3,
+            _ => 0
+        };
+        enginePick.SelectionChanged += (_, _) =>
+        {
+            draft.Engine = enginePick.SelectedIndex switch
+            {
+                1 => TranslationEngines.Google,
+                2 => TranslationEngines.DeepL,
+                3 => TranslationEngines.Papago,
+                _ => TranslationEngines.Free
+            };
+        };
+        engineCardContent.Children.Add(CreatePickerRow("엔진", enginePick));
+
+        ComboBox CreateLanguagePicker(string code, string fallback, Action<string> assign)
+        {
+            var pick = new ComboBox();
+            Ui.StyleComboBox(pick);
+            var normalized = TranslationEngines.NormalizeCode(code, fallback);
+            int selected = 0;
+            for (int i = 0; i < TranslationEngines.Languages.Length; i++)
+            {
+                pick.Items.Add(TranslationEngines.Languages[i].Label);
+                if (TranslationEngines.Languages[i].Code == normalized) selected = i;
+            }
+            pick.SelectedIndex = selected;
+            pick.SelectionChanged += (_, _) =>
+            {
+                if (pick.SelectedIndex >= 0 && pick.SelectedIndex < TranslationEngines.Languages.Length)
+                {
+                    assign(TranslationEngines.Languages[pick.SelectedIndex].Code);
+                }
+            };
+            return pick;
+        }
+
+        var languageRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 2, 0, 2) };
+        var sourcePick = CreateLanguagePicker(draft.SourceLanguage, "en", v => draft.SourceLanguage = v);
+        sourcePick.Width = 110;
+        sourcePick.Margin = new Thickness(8, 0, 14, 0);
+        var targetPick = CreateLanguagePicker(draft.TargetLanguage, "ko", v => draft.TargetLanguage = v);
+        targetPick.Width = 110;
+        targetPick.Margin = new Thickness(8, 0, 0, 0);
+        languageRow.Children.Add(new TextBlock
+        {
+            Text = "원문",
+            Foreground = Theme.BrushTextSecondary,
+            FontSize = 12.5,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        languageRow.Children.Add(sourcePick);
+        languageRow.Children.Add(new TextBlock
+        {
+            Text = "번역",
+            Foreground = Theme.BrushTextSecondary,
+            FontSize = 12.5,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        languageRow.Children.Add(targetPick);
+        engineCardContent.Children.Add(languageRow);
+
+        var keyBox = new TextBox { Text = draft.ApiKey ?? "", Width = 220, MinHeight = 28 };
+        Ui.StyleTextBox(keyBox);
+        keyBox.Margin = new Thickness(8, 0, 0, 0);
+        keyBox.TextChanged += (_, _) => draft.ApiKey = keyBox.Text;
+        var keyRow = new DockPanel { Margin = new Thickness(0, 2, 0, 2) };
+        DockPanel.SetDock(keyBox, Dock.Right);
+        keyRow.Children.Add(keyBox);
+        keyRow.Children.Add(new TextBlock
+        {
+            Text = "API 키",
+            Foreground = Theme.BrushTextSecondary,
+            FontSize = 12.5,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        engineCardContent.Children.Add(keyRow);
+        engineCardContent.Children.Add(Ui.Text("Papago는 ClientID:ClientSecret 형식입니다. 키는 %LOCALAPPDATA%\\hoonsoo\\settings.json 에 저장됩니다.", 11, true));
+
+        rightCol.Children.Add(new Border
+        {
+            Background = Theme.BrushBgCard,
+            BorderBrush = Theme.BrushHairline,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(Radii.Card),
+            Padding = new Thickness(16, 13, 16, 13),
+            Margin = new Thickness(0, 4, 0, 16),
+            Child = engineCardContent
+        });
+
         rightCol.Children.Add(Ui.Heading("동작 옵션"));
         rightCol.Children.Add(Ui.Text("앱의 번역 및 실행 동작을 제어합니다.", 12, true));
 
