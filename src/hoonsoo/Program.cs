@@ -152,7 +152,13 @@ public sealed class AppController : IDisposable
     }
     public void Start(bool background)
     {
-        if (!hotkey.Set(settings.Modifiers, settings.Key) || !regionHotkey.Set(settings.RegionModifiers, settings.RegionKey) || !areaHotkey.Set(settings.AreaModifiers, settings.AreaKey) || !arHotkey.Set(settings.ArModifiers, settings.ArKey)) { tray.ShowBalloonTip(5000, "훈수", "단축키 충돌입니다. 설정에서 다른 키를 지정하세요.", Forms.ToolTipIcon.Warning); OpenSettings(); }
+        // Every hotkey is attempted even after a conflict: `||` short-circuited the rest, so one taken key
+        // silently left the other three unregistered for the whole session.
+        bool conflict = !hotkey.Set(settings.Modifiers, settings.Key);
+        conflict |= !regionHotkey.Set(settings.RegionModifiers, settings.RegionKey);
+        conflict |= !areaHotkey.Set(settings.AreaModifiers, settings.AreaKey);
+        conflict |= !arHotkey.Set(settings.ArModifiers, settings.ArKey);
+        if (conflict) { tray.ShowBalloonTip(5000, "훈수", "단축키 충돌입니다. 설정에서 다른 키를 지정하세요.", Forms.ToolTipIcon.Warning); OpenSettings(); }
         else if (!background) OpenSettings();
     }
     private void Cancel() { generation++; request?.Cancel(); CloseArOverlay(); }
@@ -307,8 +313,11 @@ public sealed class AppController : IDisposable
         if (arOverlay is null || arOverlay.ScreenBounds != screen.Bounds)
         {
             CloseArOverlay();
-            arOverlay = new ArOverlayWindow(screen.Bounds, () => arOverlay = null);
-            arOverlay.Show();
+            // Same guard as the full-screen flow: a dismissed overlay must not clear a newer reference.
+            ArOverlayWindow? overlay = null;
+            overlay = new ArOverlayWindow(screen.Bounds, () => { if (ReferenceEquals(arOverlay, overlay)) arOverlay = null; });
+            arOverlay = overlay;
+            overlay.Show();
         }
         plateRect = arOverlay.DisplayRegionResult(region, text, pending, settings.RegionTextScale);
     }
@@ -350,12 +359,14 @@ public sealed class AppController : IDisposable
     {
         if (arOverlay is not null)
         {
-            CloseArOverlay();
+            // Closing the HUD must stop the OCR/translation it started too: without the cancel, a stale run
+            // finished after the next one began and closed the new overlay from under the user.
+            Cancel();
             return;
         }
         Cancel(); ClosePopup();
         if (!enabled) return;
-        var local = new CancellationTokenSource(); request = local; var token = local.Token;
+        var local = new CancellationTokenSource(); request = local; var token = local.Token; long id = generation;
         try
         {
             Native.GetCursorPos(out var cursorPos);
@@ -374,9 +385,12 @@ public sealed class AppController : IDisposable
                 }
             }
 
-            arOverlay = new ArOverlayWindow(bounds, () => arOverlay = null);
-            arOverlay.Show();
-            arOverlay.ShowLoading("⚡ 활성 창 훈수 자막 분석 중...");
+            // A dismissed overlay must only clear its own reference: a stale one used to null the newer HUD.
+            ArOverlayWindow? overlay = null;
+            overlay = new ArOverlayWindow(bounds, () => { if (ReferenceEquals(arOverlay, overlay)) arOverlay = null; });
+            arOverlay = overlay;
+            overlay.Show();
+            overlay.ShowLoading("⚡ 활성 창 훈수 자막 분석 중...");
             var pageResult = await WindowsMediaOcr.CaptureAndRecognizeAsync(bounds, token);
             if (pageResult is null || pageResult.Lines.Count == 0)
             {
@@ -403,7 +417,9 @@ public sealed class AppController : IDisposable
             }
 
             arOverlay?.ShowLoading($"⚡ 훈수 번역 중 ({blocks.Count}개 블록)...");
-            await ArTranslationService.TranslateBlocksAsync(blocks, token);
+            // The screen is full of source code more often than not, so the code-protection setting applies
+            // here exactly as it does to a cursor popup.
+            var outcome = await ArTranslationService.TranslateBlocksAsync(blocks, settings.ProtectCode, token);
 
             int translatedCount = blocks.Count(b => !string.IsNullOrWhiteSpace(b.TranslatedText));
             if (translatedCount == 0)
@@ -411,6 +427,12 @@ public sealed class AppController : IDisposable
                 if (FreeTranslationProvider.IsGoogleRateLimited)
                 {
                     arOverlay?.ShowLoading("⚠️ Google 번역 한도에 도달했습니다. 잠시 후 다시 시도하세요. (ESC로 닫기)");
+                }
+                else if (outcome.TransportFailed)
+                {
+                    // "Nothing to translate" used to cover an unreachable service, which sends the user
+                    // looking at the wrong problem.
+                    arOverlay?.ShowLoading("번역 서비스에 연결하지 못했습니다. 인터넷 연결을 확인하세요. (ESC로 닫기)");
                 }
                 else
                 {
@@ -421,7 +443,7 @@ public sealed class AppController : IDisposable
                 return;
             }
 
-            if (arOverlay is not null && !token.IsCancellationRequested)
+            if (arOverlay is not null && id == generation && !token.IsCancellationRequested)
             {
                 arOverlay.DisplaySubtitles(blocks, bounds.Left, bounds.Top, settings.ArTextScale);
             }
@@ -429,6 +451,8 @@ public sealed class AppController : IDisposable
         catch (OperationCanceledException) { }
         catch
         {
+            // Only the run that is still current may tear down what is on screen.
+            if (id != generation) return;
             CloseArOverlay();
             tray.ShowBalloonTip(3000, "훈수", "전체 화면 번역을 수행하지 못했습니다.", Forms.ToolTipIcon.Warning);
         }

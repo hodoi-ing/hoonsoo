@@ -344,11 +344,11 @@ internal static class TestProgram
             ArTranslationService.Transport = transport;
             try
             {
-                await ArTranslationService.TranslateBlocksAsync(blocks);
+                await ArTranslationService.TranslateBlocksAsync(blocks, protectCode: false);
                 Assert(blocks.All(b => !string.IsNullOrWhiteSpace(b.TranslatedText)), "All blocks should have translations");
                 Assert(transport.Count == 1, $"one batch request expected, saw {transport.Count}");
 
-                await ArTranslationService.TranslateBlocksAsync(blocks);
+                await ArTranslationService.TranslateBlocksAsync(blocks, protectCode: false);
                 Assert(transport.Count == 1, $"cache hit must not re-request, saw {transport.Count}");
             }
             finally { ArTranslationService.Transport = null; }
@@ -372,10 +372,62 @@ internal static class TestProgram
             ArTranslationService.Transport = transport;
             try
             {
-                await ArTranslationService.TranslateBlocksAsync(blocks);
+                await ArTranslationService.TranslateBlocksAsync(blocks, protectCode: false);
                 Assert(failedBatch, "the batch request should have been attempted first");
                 Assert(transport.Count == 3, $"one failed batch plus two singles expected, saw {transport.Count}");
                 Assert(blocks.All(b => !string.IsNullOrWhiteSpace(b.TranslatedText)), "fallback should translate every block");
+            }
+            finally { ArTranslationService.Transport = null; }
+        });
+        await Test("full screen translation masks code and paths before they leave the process", async () =>
+        {
+            var lines = new List<OcrLineInfo>
+            {
+                new("Run npm run dev in C:\\work\\hoonsoo", new Drawing.Rectangle(50, 50, 320, 20), [])
+            };
+            var blocks = ArTranslationService.MergeLinesToBlocks(lines);
+            Assert(blocks.Count == 1, $"fixture should give one block, got {blocks.Count}");
+            string? sent = null;
+            var transport = new Handler((request, _) =>
+            {
+                sent = Uri.UnescapeDataString(request.RequestUri!.Query.Split("&q=")[^1]);
+                return Task.FromResult(TranslationResponse(request));
+            });
+            ArTranslationService.Transport = transport;
+            try
+            {
+                await ArTranslationService.TranslateBlocksAsync(blocks, protectCode: true);
+                Assert(sent is not null, "the transport should have been called");
+                Assert(!sent!.Contains("npm run dev"), $"the command must not leave the machine, sent: {sent}");
+                Assert(!sent.Contains(@"C:\work\hoonsoo"), $"the path must not leave the machine, sent: {sent}");
+                Assert(blocks[0].TranslatedText.Contains("npm run dev"), $"the masked command must come back: {blocks[0].TranslatedText}");
+                Assert(blocks[0].TranslatedText.Contains(@"C:\work\hoonsoo"), $"the masked path must come back: {blocks[0].TranslatedText}");
+            }
+            finally { ArTranslationService.Transport = null; }
+        });
+        await Test("full screen translation drops a block rather than render a corrupted token", async () =>
+        {
+            var blocks = ArTranslationService.MergeLinesToBlocks(new List<OcrLineInfo> { new("Open the npm install guide", new Drawing.Rectangle(0, 0, 240, 20), []) });
+            ArTranslationService.Transport = new Handler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(JsonSerializer.Serialize(new[] { new[] { new[] { "번역 완료", "x" } } }))
+            }));
+            try
+            {
+                await ArTranslationService.TranslateBlocksAsync(blocks, protectCode: true);
+                Assert(blocks[0].TranslatedText.Length == 0, $"a translation that lost its masked token must not render, got '{blocks[0].TranslatedText}'");
+            }
+            finally { ArTranslationService.Transport = null; }
+        });
+        await Test("full screen translation reports an unreachable service instead of 'nothing to translate'", async () =>
+        {
+            var blocks = ArTranslationService.MergeLinesToBlocks(new List<OcrLineInfo> { new("Another line of English prose", new Drawing.Rectangle(0, 0, 240, 20), []) });
+            ArTranslationService.Transport = new Handler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)));
+            try
+            {
+                var outcome = await ArTranslationService.TranslateBlocksAsync(blocks, protectCode: true);
+                Assert(outcome.TransportFailed, "a request that never got an answer must be reported to the caller");
+                Assert(blocks[0].TranslatedText.Length == 0, "nothing may be rendered when the service never answered");
             }
             finally { ArTranslationService.Transport = null; }
         });
