@@ -68,7 +68,12 @@ public static class ArTranslationService
     // dropped (see SplitForTranslation).
     private const int MaxBatchItems = 20;
     private const int MaxEscapedQueryLength = 1800;
-    private const string Endpoint = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=";
+    /// <summary>AR subtitle language pair. Set from settings by AppController; English source by default.</summary>
+    public static string SourceLanguage { get; set; } = "en";
+    public static string TargetLanguage { get; set; } = "ko";
+    // Built per request instead of being a const: the pair now follows settings, while the endpoint stays the
+    // same undocumented one the popup path uses (and the AR path has no keyed alternative).
+    private static string Endpoint => $"https://translate.googleapis.com/translate_a/single?client=gtx&sl={SourceLanguage}&tl={TargetLanguage}&dt=t&q=";
 
     private static readonly HashSet<string> CodeKeywords = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -601,9 +606,20 @@ public static class ArTranslationService
         }
     }
 
+    // The AR path keeps its own cooldown. It used to set FreeTranslationProvider.IsGoogleRateLimited, which is the
+    // popup path's flag: a single screen-subtitle 429 then blocked hover translation for two minutes as well,
+    // and the user saw only a generic failure.
+    private static DateTime arCooldownUntil = DateTime.MinValue;
+    private static readonly object arCooldownLock = new();
+    private static bool ArGoogleRateLimited
+    {
+        get { lock (arCooldownLock) return DateTime.UtcNow < arCooldownUntil; }
+        set { lock (arCooldownLock) arCooldownUntil = value ? DateTime.UtcNow.AddMinutes(2) : DateTime.MinValue; }
+    }
+
     private static async Task<string?> GetTranslationRawAsync(string escapedQuery, CancellationToken token)
     {
-        if (injectedHttp is null && FreeTranslationProvider.IsGoogleRateLimited) return null;
+        if (injectedHttp is null && ArGoogleRateLimited) return null;
         string url = Endpoint + escapedQuery;
 
         await HttpGate.WaitAsync(token).ConfigureAwait(false);
@@ -613,7 +629,7 @@ public static class ArTranslationService
             using var response = await Client.GetAsync(url, token).ConfigureAwait(false);
             if (injectedHttp is null && response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
             {
-                FreeTranslationProvider.IsGoogleRateLimited = true;
+                ArGoogleRateLimited = true;
                 return null;
             }
             if (!response.IsSuccessStatusCode) return null;
