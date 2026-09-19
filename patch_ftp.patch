@@ -1,0 +1,38 @@
+*** Begin Patch
+*** Update File: src/DevLingo/FreeTranslationProvider.cs
+@@ -15,2 +15,7 @@
+     private const int MaxCachedResults = 100;
++    private static DateTime googleRateLimitCooldownUntil = DateTime.MinValue;
++    private static readonly object cooldownLock = new();
++    public static bool IsGoogleRateLimited
++    {
++        get { lock (cooldownLock) return DateTime.UtcNow < googleRateLimitCooldownUntil; }
++        set { lock (cooldownLock) if (value) googleRateLimitCooldownUntil = DateTime.UtcNow.AddMinutes(2); }
++    }
+     private readonly HttpClient client;
+@@ -93,7 +98,8 @@
+         string? result = null;
+-        try
++        if (!IsGoogleRateLimited)
+         {
+-            using var response = await client.GetAsync("https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=" + Uri.EscapeDataString(text.Trim()), token);
+-            if (response.IsSuccessStatusCode)
++            try
++            {
++                using var response = await client.GetAsync("https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=" + Uri.EscapeDataString(text.Trim()), token);
++                if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
++                {
++                    IsGoogleRateLimited = true;
++                }
++                else if (response.IsSuccessStatusCode)
+                 {
+@@ -104,4 +110,6 @@
+                 }
++            }
++            catch (OperationCanceledException) { throw; }
++            catch { }
+         }
+-        catch (OperationCanceledException) { throw; }
+-        catch { }
+ 
+*** End Patch

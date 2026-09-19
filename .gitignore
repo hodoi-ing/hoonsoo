@@ -1,0 +1,22 @@
+# 빌드 산출물
+work/
+outputs/
+**/bin/
+**/obj/
+.vs/
+*.user
+*.suo
+
+# 자격 증명
+.env*
+
+# 에이전트 세션 산출물 / 백업
+.insane-research/
+.kkirikkiri/
+.pumasi/
+.ui-polish-backup/
+
+# OS 잡파일
+Thumbs.db
+desktop.ini
+*.prev
