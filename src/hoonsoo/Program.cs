@@ -285,7 +285,7 @@ public sealed class AppController : IDisposable
             if (result is null || !result.Quality || TextQuality.Clean(result.Text).Length == 0) { ShowRegionOverlay(region, "텍스트를 정확하게 읽지 못했습니다.", false); popup?.Error("저장된 드래그 영역에서 텍스트를 읽지 못했습니다.", settings); return; }
             popup?.Status("번역 중…"); ShowRegionOverlay(region, "번역 중…", true);
             var translated = await provider.TranslateAsync(result.Text, result.Method, settings.Terms, settings.ProtectCode, token);
-            popup?.Result(translated, settings); ShowRegionOverlay(region, translated.Error ?? translated.TranslatedText, false);
+            popup?.Result(translated, settings, settings.RegionTextScale); ShowRegionOverlay(region, translated.Error ?? translated.TranslatedText, false);
         }
         catch (OperationCanceledException) { }
         catch { popup?.Error("저장된 영역 OCR에 실패했습니다. 영역 OCR로 다시 지정하세요.", settings); ShowRegionOverlay(region, "텍스트를 읽지 못했습니다.", false); }

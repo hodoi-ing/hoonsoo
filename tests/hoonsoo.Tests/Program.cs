@@ -235,6 +235,21 @@ internal static class TestProgram
             using var bitmap = new Bitmap(1000, 130); using (var g = Graphics.FromImage(bitmap)) { g.Clear(Drawing.Color.White); using var font = new Font("Arial", 26); g.DrawString("Install the package and restart the application.", font, Drawing.Brushes.Black, 12, 35); }
             var r = CaptureWorker.Recognize(bitmap); Assert(r is { Quality: true } && r.Text.Contains("package", StringComparison.OrdinalIgnoreCase), r?.Text ?? "no OCR result");
         });
+        await Test("popup answer text follows the region text size", () =>
+        {
+            var popup = new PopupWindow();
+            var content = (DependencyObject)popup.Content;
+            var settings = new Settings { AutoClose = false };
+            popup.Result(new("source text", "번역 결과", [], "test"), settings, settings.RegionTextScale);
+            Assert(HasFontSize(content, 15), "100 % must keep the answer at 15 px");
+            Assert(HasFontSize(content, 13), "100 % must keep the original at 13 px");
+            settings.RegionTextPercent = 150;
+            popup.Result(new("source text", "번역 결과", [], "test"), settings, settings.RegionTextScale);
+            Assert(HasFontSize(content, 22.5), "150 % must scale the answer to 22.5 px");
+            Assert(HasFontSize(content, 19.5), "150 % must scale the original to 19.5 px");
+            popup.Result(new("source text", "번역 결과", [], "test"), settings, 0);
+            Assert(HasFontSize(content, 15), "a corrupt scale must fall back to 100 %");
+        });
         await Test("WPF popup no activation, scroll content, reread event, autoclose", async () =>
         {
             Native.GetCursorPos(out var savedCursor); SetCursorPos(5, 5); var foreground = Native.GetForegroundWindow(); var popup = new PopupWindow(); bool closed = false, reread = false; popup.Closed += (_, _) => closed = true; popup.Reread += () => reread = true;
@@ -768,6 +783,8 @@ internal static class TestProgram
         Application.Current.Windows.OfType<Window>().Where(w => w.IsVisible && w.Topmost && w.WindowStyle == WindowStyle.None && w.Cursor == System.Windows.Input.Cursors.Cross);
     private static IEnumerable<T> FindNodes<T>(DependencyObject root) where T : DependencyObject
     { if (root is T value) yield return value; foreach (var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>()) foreach (var nested in FindNodes<T>(child)) yield return nested; }
+    /// <summary>True when any text in the tree is drawn at <paramref name="size"/>: how the size picker is checked without opening a window.</summary>
+    private static bool HasFontSize(DependencyObject root, double size) => FindNodes<TextBlock>(root).Any(t => Math.Abs(t.FontSize - size) < 0.01);
     private static string AllText(DependencyObject root)
     { var text = root is TextBlock t ? t.Text : ""; foreach (var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>()) text += AllText(child); return text; }
     private static IEnumerable<Button> FindButtons(DependencyObject root)
