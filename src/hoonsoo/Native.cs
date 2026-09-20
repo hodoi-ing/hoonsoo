@@ -54,7 +54,9 @@ public static class Native
                 if (vkCode == VK_ESCAPE)
                 {
                     try { onEscape(); } catch { }
-                    return (IntPtr)1; // Consume key!
+                    // Observed, not owned: hoonsoo's surfaces close on ESC and the focused app still gets the
+                    // key. Returning 1 here swallowed ESC process-wide for as long as a popup or the AR HUD
+                    // stayed open, which is the opposite of the documented contract.
                 }
             }
             return CallNextHookEx(hookId, nCode, wParam, lParam);

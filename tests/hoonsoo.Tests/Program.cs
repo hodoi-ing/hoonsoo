@@ -235,6 +235,21 @@ internal static class TestProgram
             using var bitmap = new Bitmap(1000, 130); using (var g = Graphics.FromImage(bitmap)) { g.Clear(Drawing.Color.White); using var font = new Font("Arial", 26); g.DrawString("Install the package and restart the application.", font, Drawing.Brushes.Black, 12, 35); }
             var r = CaptureWorker.Recognize(bitmap); Assert(r is { Quality: true } && r.Text.Contains("package", StringComparison.OrdinalIgnoreCase), r?.Text ?? "no OCR result");
         });
+        await Test("popup answer text follows the region text size", () =>
+        {
+            var popup = new PopupWindow();
+            var content = (DependencyObject)popup.Content;
+            var settings = new Settings { AutoClose = false };
+            popup.Result(new("source text", "번역 결과", [], "test"), settings, settings.RegionTextScale);
+            Assert(HasFontSize(content, 15), "100 % must keep the answer at 15 px");
+            Assert(HasFontSize(content, 13), "100 % must keep the original at 13 px");
+            settings.RegionTextPercent = 150;
+            popup.Result(new("source text", "번역 결과", [], "test"), settings, settings.RegionTextScale);
+            Assert(HasFontSize(content, 22.5), "150 % must scale the answer to 22.5 px");
+            Assert(HasFontSize(content, 19.5), "150 % must scale the original to 19.5 px");
+            popup.Result(new("source text", "번역 결과", [], "test"), settings, 0);
+            Assert(HasFontSize(content, 15), "a corrupt scale must fall back to 100 %");
+        });
         await Test("WPF popup no activation, scroll content, reread event, autoclose", async () =>
         {
             Native.GetCursorPos(out var savedCursor); SetCursorPos(5, 5); var foreground = Native.GetForegroundWindow(); var popup = new PopupWindow(); bool closed = false, reread = false; popup.Closed += (_, _) => closed = true; popup.Reread += () => reread = true;
@@ -344,11 +359,11 @@ internal static class TestProgram
             ArTranslationService.Transport = transport;
             try
             {
-                await ArTranslationService.TranslateBlocksAsync(blocks);
+                await ArTranslationService.TranslateBlocksAsync(blocks, protectCode: false);
                 Assert(blocks.All(b => !string.IsNullOrWhiteSpace(b.TranslatedText)), "All blocks should have translations");
                 Assert(transport.Count == 1, $"one batch request expected, saw {transport.Count}");
 
-                await ArTranslationService.TranslateBlocksAsync(blocks);
+                await ArTranslationService.TranslateBlocksAsync(blocks, protectCode: false);
                 Assert(transport.Count == 1, $"cache hit must not re-request, saw {transport.Count}");
             }
             finally { ArTranslationService.Transport = null; }
@@ -372,10 +387,62 @@ internal static class TestProgram
             ArTranslationService.Transport = transport;
             try
             {
-                await ArTranslationService.TranslateBlocksAsync(blocks);
+                await ArTranslationService.TranslateBlocksAsync(blocks, protectCode: false);
                 Assert(failedBatch, "the batch request should have been attempted first");
                 Assert(transport.Count == 3, $"one failed batch plus two singles expected, saw {transport.Count}");
                 Assert(blocks.All(b => !string.IsNullOrWhiteSpace(b.TranslatedText)), "fallback should translate every block");
+            }
+            finally { ArTranslationService.Transport = null; }
+        });
+        await Test("full screen translation masks code and paths before they leave the process", async () =>
+        {
+            var lines = new List<OcrLineInfo>
+            {
+                new("Run npm run dev in C:\\work\\hoonsoo", new Drawing.Rectangle(50, 50, 320, 20), [])
+            };
+            var blocks = ArTranslationService.MergeLinesToBlocks(lines);
+            Assert(blocks.Count == 1, $"fixture should give one block, got {blocks.Count}");
+            string? sent = null;
+            var transport = new Handler((request, _) =>
+            {
+                sent = Uri.UnescapeDataString(request.RequestUri!.Query.Split("&q=")[^1]);
+                return Task.FromResult(TranslationResponse(request));
+            });
+            ArTranslationService.Transport = transport;
+            try
+            {
+                await ArTranslationService.TranslateBlocksAsync(blocks, protectCode: true);
+                Assert(sent is not null, "the transport should have been called");
+                Assert(!sent!.Contains("npm run dev"), $"the command must not leave the machine, sent: {sent}");
+                Assert(!sent.Contains(@"C:\work\hoonsoo"), $"the path must not leave the machine, sent: {sent}");
+                Assert(blocks[0].TranslatedText.Contains("npm run dev"), $"the masked command must come back: {blocks[0].TranslatedText}");
+                Assert(blocks[0].TranslatedText.Contains(@"C:\work\hoonsoo"), $"the masked path must come back: {blocks[0].TranslatedText}");
+            }
+            finally { ArTranslationService.Transport = null; }
+        });
+        await Test("full screen translation drops a block rather than render a corrupted token", async () =>
+        {
+            var blocks = ArTranslationService.MergeLinesToBlocks(new List<OcrLineInfo> { new("Open the npm install guide", new Drawing.Rectangle(0, 0, 240, 20), []) });
+            ArTranslationService.Transport = new Handler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(JsonSerializer.Serialize(new[] { new[] { new[] { "번역 완료", "x" } } }))
+            }));
+            try
+            {
+                await ArTranslationService.TranslateBlocksAsync(blocks, protectCode: true);
+                Assert(blocks[0].TranslatedText.Length == 0, $"a translation that lost its masked token must not render, got '{blocks[0].TranslatedText}'");
+            }
+            finally { ArTranslationService.Transport = null; }
+        });
+        await Test("full screen translation reports an unreachable service instead of 'nothing to translate'", async () =>
+        {
+            var blocks = ArTranslationService.MergeLinesToBlocks(new List<OcrLineInfo> { new("Another line of English prose", new Drawing.Rectangle(0, 0, 240, 20), []) });
+            ArTranslationService.Transport = new Handler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)));
+            try
+            {
+                var outcome = await ArTranslationService.TranslateBlocksAsync(blocks, protectCode: true);
+                Assert(outcome.TransportFailed, "a request that never got an answer must be reported to the caller");
+                Assert(blocks[0].TranslatedText.Length == 0, "nothing may be rendered when the service never answered");
             }
             finally { ArTranslationService.Transport = null; }
         });
@@ -716,6 +783,8 @@ internal static class TestProgram
         Application.Current.Windows.OfType<Window>().Where(w => w.IsVisible && w.Topmost && w.WindowStyle == WindowStyle.None && w.Cursor == System.Windows.Input.Cursors.Cross);
     private static IEnumerable<T> FindNodes<T>(DependencyObject root) where T : DependencyObject
     { if (root is T value) yield return value; foreach (var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>()) foreach (var nested in FindNodes<T>(child)) yield return nested; }
+    /// <summary>True when any text in the tree is drawn at <paramref name="size"/>: how the size picker is checked without opening a window.</summary>
+    private static bool HasFontSize(DependencyObject root, double size) => FindNodes<TextBlock>(root).Any(t => Math.Abs(t.FontSize - size) < 0.01);
     private static string AllText(DependencyObject root)
     { var text = root is TextBlock t ? t.Text : ""; foreach (var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>()) text += AllText(child); return text; }
     private static IEnumerable<Button> FindButtons(DependencyObject root)

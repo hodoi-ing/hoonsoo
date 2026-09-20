@@ -15,6 +15,11 @@ public sealed class PopupWindow : Window
     // Room for the soft shadow so elevation is not clipped by the window edge.
     private const double ShadowGutter = 16;
 
+    // Answer text at 100 %. The size picker multiplies these, so the two surfaces that answer a dragged
+    // region — this popup and the on-screen plate — grow together instead of drifting apart.
+    private const double ResultFontSize = 15;
+    private const double OriginalFontSize = 13;
+
     private readonly StackPanel body = new();
     private readonly ScrollViewer scroll = new() { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, MaxHeight = 420 };
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromMilliseconds(100) };
@@ -261,10 +266,23 @@ public sealed class PopupWindow : Window
         deadline = DateTime.UtcNow.AddSeconds(settings.CloseSeconds);
     }
 
-    public void Result(TranslationResult result, Settings settings)
+    /// <summary>
+    /// Only a finite, positive factor is honoured: settings.json is meant to stay hand-editable, so a 0 or
+    /// NaN percent must not collapse the answer to an unreadable size.
+    /// </summary>
+    private static double Normalized(double scale) => double.IsFinite(scale) && scale > 0 ? scale : 1.0;
+
+    /// <summary>
+    /// Renders an answer. <paramref name="scale"/> is the user's size choice for the surface this answer
+    /// belongs to: the dragged-region flow passes <see cref="Settings.RegionTextScale"/> because in
+    /// "팝업만" mode this popup is the only place a region answer is drawn — the picker used to move
+    /// nothing at all there.
+    /// </summary>
+    public void Result(TranslationResult result, Settings settings, double scale = 1.0)
     {
         ResetCopyFeedback();
         body.Children.Clear();
+        double resultFontSize = ResultFontSize * Normalized(scale);
 
         // Main translated text card
         var resultCard = new Border
@@ -277,7 +295,7 @@ public sealed class PopupWindow : Window
             Margin = new Thickness(0, 0, 0, 10),
             Effect = Ui.CardShadow()
         };
-        var resultText = Ui.Text(result.Error ?? result.TranslatedText, 15, false);
+        var resultText = Ui.Text(result.Error ?? result.TranslatedText, resultFontSize, false);
         if (result.Error != null)
         {
             resultText.Foreground = Theme.BrushDanger;
@@ -329,7 +347,7 @@ public sealed class PopupWindow : Window
             Padding = new Thickness(11),
             Margin = new Thickness(0, 4, 0, 4)
         };
-        originalCard.Child = Ui.Text(result.OriginalText, 13, true);
+        originalCard.Child = Ui.Text(result.OriginalText, OriginalFontSize * Normalized(scale), true);
         originalExpander.Content = originalCard;
         body.Children.Add(originalExpander);
 

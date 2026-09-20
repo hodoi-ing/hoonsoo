@@ -33,6 +33,12 @@ public sealed class ArBlock
     }
 }
 
+/// <summary>
+/// What one full-screen pass managed to do. <see cref="TransportFailed"/> is what lets the caller tell a
+/// translation service it could not reach apart from a screen that simply had nothing left to translate.
+/// </summary>
+public readonly record struct ArTranslationOutcome(bool TransportFailed);
+
 public static class ArTranslationService
 {
     private static readonly Dictionary<string, string> Cache = new(StringComparer.Ordinal);
@@ -42,6 +48,8 @@ public static class ArTranslationService
 
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(12) };
     private static HttpClient? injectedHttp;
+    /// <summary>Requests in the current pass that never produced an HTTP response (or came back non-success).</summary>
+    private static int transportFailures;
 
     /// <summary>
     /// Replaces the outbound transport. Tests use it to exercise the batch, split and fallback paths
@@ -206,15 +214,19 @@ public static class ArTranslationService
         );
     }
 
-    public static async Task TranslateBlocksAsync(List<ArBlock> blocks, CancellationToken token = default)
+    public static async Task<ArTranslationOutcome> TranslateBlocksAsync(List<ArBlock> blocks, bool protectCode, CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested();
-        if (blocks.Count == 0) return;
+        Interlocked.Exchange(ref transportFailures, 0);
+        if (blocks.Count == 0) return new ArTranslationOutcome(false);
 
         // Group blocks by identical cleaned text so one successful translation is
         // shared across every duplicate instead of being requested again.
         var groups = new Dictionary<string, List<ArBlock>>(StringComparer.Ordinal);
         var order = new List<string>();
+        // Code, commands and paths are masked before the text leaves the process, exactly as the popup path
+        // does through CodeProtection. The map is only read once the batches start, so the tasks can share it.
+        var masked = protectCode ? new Dictionary<string, CodeProtection>(StringComparer.Ordinal) : null;
 
         foreach (var block in blocks)
         {
@@ -232,6 +244,11 @@ public static class ArTranslationService
                 list = new List<ArBlock>();
                 groups.Add(query, list);
                 order.Add(query);
+                if (masked is not null)
+                {
+                    var guard = new CodeProtection(query);
+                    if (guard.Tokens.Count > 0) masked.Add(query, guard);
+                }
             }
             list.Add(block);
         }
@@ -242,7 +259,7 @@ public static class ArTranslationService
 
             var batches = new List<List<string>>();
             var individual = new List<string>();
-            BuildBatches(order, batches, individual);
+            BuildBatches(order, masked, batches, individual);
 
             var results = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
             var failed = new ConcurrentQueue<string>();
@@ -252,7 +269,7 @@ public static class ArTranslationService
             var batchTasks = new List<Task>(batches.Count);
             foreach (var batch in batches)
             {
-                batchTasks.Add(TranslateBatchAsync(batch, results, failed, token));
+                batchTasks.Add(TranslateBatchAsync(batch, masked, results, failed, token));
             }
             if (batchTasks.Count > 0) await Task.WhenAll(batchTasks).ConfigureAwait(false);
 
@@ -267,7 +284,7 @@ public static class ArTranslationService
                 await RunBoundedAsync(fallback, MaxHttpConcurrency, async query =>
                 {
                     if (results.ContainsKey(query)) return;
-                    string? translated = await TranslateSingleAsync(query, token).ConfigureAwait(false);
+                    string? translated = await TranslateMaskedAsync(query, masked, token).ConfigureAwait(false);
                     if (translated is not null) results[query] = translated;
                 }, token).ConfigureAwait(false);
             }
@@ -294,19 +311,22 @@ public static class ArTranslationService
                 block.TranslatedText = ""; // Suppress rendering this chip
             }
         }
+
+        return new ArTranslationOutcome(Volatile.Read(ref transportFailures) > 0);
     }
 
     // Splits unique queries into delimiter-joined batches, keeping the escaped query
     // size bounded. Sources that already contain the separator are never batched
-    // because the positional split could not be trusted.
-    private static void BuildBatches(List<string> queries, List<List<string>> batches, List<string> individual)
+    // because the positional split could not be trusted. Budgets are measured on the
+    // masked text, which is what the request actually carries.
+    private static void BuildBatches(List<string> queries, Dictionary<string, CodeProtection>? masked, List<List<string>> batches, List<string> individual)
     {
         var current = new List<string>();
         int currentLength = 0;
 
         foreach (var query in queries)
         {
-            if (!IsBatchSafe(query, out int escapedLength))
+            if (!IsBatchSafe(Wire(query, masked), out int escapedLength))
             {
                 individual.Add(query);
                 continue;
@@ -326,6 +346,30 @@ public static class ArTranslationService
         }
 
         if (current.Count > 0) batches.Add(current);
+    }
+
+    /// <summary>The text that actually goes on the wire for this query: masked when protection found code.</summary>
+    private static string Wire(string query, Dictionary<string, CodeProtection>? masked) =>
+        masked is not null && masked.TryGetValue(query, out var guard) ? guard.Text : query;
+
+    /// <summary>
+    /// Sends one query — masked first when protection is on — and puts the masked spans back in the result.
+    /// A token that returns missing, duplicated, or unknown is a failure, never a partial sentence: the
+    /// block then stays untranslated instead of rendering corrupted code.
+    /// </summary>
+    private static async Task<string?> TranslateMaskedAsync(string query, Dictionary<string, CodeProtection>? masked, CancellationToken token)
+    {
+        CodeProtection? guard = masked is not null && masked.TryGetValue(query, out var found) ? found : null;
+        string? translated = await TranslateSingleAsync(guard?.Text ?? query, token).ConfigureAwait(false);
+        if (translated is null || guard is null) return translated;
+        try
+        {
+            return guard.Restore(translated);
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
     }
 
     private static bool IsBatchSafe(string query, out int escapedLength)
@@ -348,11 +392,12 @@ public static class ArTranslationService
 
     private static async Task TranslateBatchAsync(
         List<string> queries,
+        Dictionary<string, CodeProtection>? masked,
         ConcurrentDictionary<string, string> results,
         ConcurrentQueue<string> failed,
         CancellationToken token)
     {
-        string combined = string.Join(Delimiter, queries);
+        string combined = string.Join(Delimiter, queries.Select(query => Wire(query, masked)));
         string escaped = Uri.EscapeDataString(combined);
         if (escaped.Length > MaxEscapedQueryLength)
         {
@@ -381,10 +426,27 @@ public static class ArTranslationService
 
         for (int i = 0; i < queries.Count; i++)
         {
-            if (IsValidTranslation(queries[i], parts[i], out string normalized))
+            CodeProtection? guard = masked is not null && masked.TryGetValue(queries[i], out var found) ? found : null;
+            string wire = guard?.Text ?? queries[i];
+            // Validation runs on the wire text, so an unmasked command sharing a block with prose is still
+            // compared against what the service actually received.
+            if (IsValidTranslation(wire, parts[i], out string normalized))
             {
-                results[queries[i]] = normalized;
-                CacheTranslation(queries[i], normalized);
+                string restored = normalized;
+                if (guard is not null)
+                {
+                    try
+                    {
+                        restored = guard.Restore(normalized);
+                    }
+                    catch (FormatException)
+                    {
+                        failed.Enqueue(queries[i]);
+                        continue;
+                    }
+                }
+                results[queries[i]] = restored;
+                CacheTranslation(queries[i], restored);
             }
             else
             {
@@ -613,17 +675,30 @@ public static class ArTranslationService
             using var response = await Client.GetAsync(url, token).ConfigureAwait(false);
             if (injectedHttp is null && response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
             {
+                // The rate-limit flag drives its own message, so this is not a transport failure.
                 FreeTranslationProvider.IsGoogleRateLimited = true;
                 return null;
             }
-            if (!response.IsSuccessStatusCode) return null;
+            if (!response.IsSuccessStatusCode)
+            {
+                Interlocked.Increment(ref transportFailures);
+                return null;
+            }
 
             string json = await response.Content.ReadAsStringAsync(token).ConfigureAwait(false);
             using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.ValueKind != JsonValueKind.Array || doc.RootElement.GetArrayLength() == 0) return null;
+            if (doc.RootElement.ValueKind != JsonValueKind.Array || doc.RootElement.GetArrayLength() == 0)
+            {
+                Interlocked.Increment(ref transportFailures);
+                return null;
+            }
 
             var segments = doc.RootElement[0];
-            if (segments.ValueKind != JsonValueKind.Array) return null;
+            if (segments.ValueKind != JsonValueKind.Array)
+            {
+                Interlocked.Increment(ref transportFailures);
+                return null;
+            }
 
             return string.Concat(segments.EnumerateArray().Select(x => x[0].GetString()));
         }
@@ -634,6 +709,7 @@ public static class ArTranslationService
         }
         catch
         {
+            Interlocked.Increment(ref transportFailures);
             return null;
         }
         finally
